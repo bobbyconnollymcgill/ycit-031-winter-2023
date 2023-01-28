@@ -1,8 +1,11 @@
+const bcrypt = require("bcrypt")
 const express = require("express")
 const session = require("express-session")
 const pgSession = require("connect-pg-simple")(session)
 
 const { Pool } = require("pg")
+
+const FRONTEND_ORIGIN = "http://localhost:8081"
 
 const databaseConnectionSettings = {
     user: "postgres",
@@ -24,10 +27,11 @@ app.use((req, res, next) => {
 })
 
 app.use((req, res, next) => {
-    res.setHeader("Access-Control-Allow-Origin", "http://localhost:8081")
+    res.setHeader("Access-Control-Allow-Origin", FRONTEND_ORIGIN)
     res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE")
     res.setHeader("Access-Control-Allow-Headers", "Content-Type")
     res.setHeader("Access-Control-Allow-Credentials", "true")
+
     next()
 })
 
@@ -50,6 +54,11 @@ app.use(
 app.use((req, res, next) => {
     console.log("session user", req.session.user)
 
+    // if (req.session.user?.id === 34) {
+    //     res.status(400).send("you have been banned")
+    //     return
+    // }
+
     next()
 })
 
@@ -63,12 +72,33 @@ app.get("/", async (req, res) => {
     res.send("it's working! " + pets)
 })
 
-app.get("/pets", async (req, res) => {
+function authMiddleware(req, res, next) {
+    if (!req.session.user) {
+        res.status(401).json({ error: "unauthorized" })
+        return
+    }
+
+    next()
+}
+
+app.get("/pets", authMiddleware, async (req, res) => {
     const result = await db.query(
         "SELECT id, name, species, breed, age, weight FROM pets;"
     )
 
     res.json(result.rows)
+})
+
+app.get("/me", authMiddleware, async (req, res) => {
+    console.log("req.session.user", req.session.user)
+
+    if (!req.session.user) {
+        res.status(401).end()
+        return
+    }
+
+    console.log("here?")
+    res.json(req.session?.user)
 })
 
 // app.get("/session", (req, res) => {
@@ -102,31 +132,75 @@ app.post("/register", async (req, res) => {
             return
         }
 
+        // Salt and hash the password
+        const salt = bcrypt.genSaltSync(10)
+        const hashedPassword = bcrypt.hashSync(req.body.password, salt)
+
         const insertText = "INSERT INTO users (username, password) VALUES ($1, $2) RETURNING *" // prettier-ignore
-        const insertValues = [req.body.username, req.body.password]
+        const insertValues = [req.body.username, hashedPassword]
         const insertResult = await db.query(insertText, insertValues)
 
-        const user = {
+        console.log(
+            "storing user context into the session",
+            insertResult.rows[0].id
+        )
+
+        req.session.user = {
             id: insertResult.rows[0].id,
         }
 
-        console.log("storing user context into the session", user)
-
-        req.session.user = user
-
-        res.status(200).end()
+        res.end()
     } catch (error) {
         console.log("ERROR!!", error)
         res.status(500).send(error.message)
     }
 })
 
-app.post("/login", (req, res) => {
-    res.status(503).end()
+app.post("/login", async (req, res) => {
+    try {
+        if (req.session.user?.id) {
+            res.end()
+            return
+        }
+
+        console.log("req.body", req.body)
+
+        const selectText = "SELECT id, password FROM users WHERE username = $1"
+        const selectValues = [req.body.username]
+
+        const selectResult = await db.query(selectText, selectValues)
+
+        if (selectResult.rowCount === 0) {
+            res.status(401).end() // send back a 401 even though it "feels like" a 404
+            return
+        }
+
+        // Compare entered password with stored hashed password
+        if (
+            !bcrypt.compareSync(
+                req.body.password,
+                selectResult.rows[0].password
+            )
+        ) {
+            res.status(401).end()
+            return
+        }
+
+        req.session.user = {
+            id: selectResult.rows[0].id,
+        }
+
+        res.end()
+    } catch (error) {
+        console.log("ERROR!!", error)
+        res.status(500).send(error.message)
+    }
 })
 
 app.post("/logout", (req, res) => {
-    res.status(503).end()
+    req.session.destroy()
+    res.clearCookie("connect.sid")
+    res.end()
 })
 
 db.connect()
